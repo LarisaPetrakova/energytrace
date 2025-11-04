@@ -1,3 +1,22 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Database files (if using SQLite)
+*.db
+
+# Local settings
+.env
+*.log
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# macOS metadata
+.DS_Store
 __pycache__/
 .env
 *.pyc
