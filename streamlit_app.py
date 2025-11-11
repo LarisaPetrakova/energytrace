@@ -2,6 +2,8 @@ import os
 import requests
 import streamlit as st
 
+st.caption(f"DEBUG API_BASE: {API_BASE}")
+
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 # ---------- Page setup ----------
