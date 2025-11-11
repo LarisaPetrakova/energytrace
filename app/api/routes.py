@@ -22,10 +22,6 @@ def to_outward(postcode: str) -> str:
 
 @router.get("/region/by-postcode/{postcode}", summary="Resolve region by UK postcode (stateless)")
 async def region_by_postcode(postcode: str):
-    """
-    Calls National Grid's postcode endpoint with the OUTWARD postcode and returns:
-    { id, name, dno_name }
-    """
     outward = to_outward(postcode)
     if not outward:
         raise HTTPException(status_code=400, detail="Invalid postcode")
@@ -39,31 +35,23 @@ async def region_by_postcode(postcode: str):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Upstream error: {e}")
 
-    # Expected NG shape:
-    # { "data": [ { "postcode":"W4", "regionid":13, "region":"London", "dnoregion":"UKPN London", ... } ] }
     try:
         data = payload.get("data")
-        item = data[0] if isinstance(data, list) and data else None
+        # Some NG responses wrap the object in a list
+        item = data[0] if isinstance(data, list) and data else data
         if not item or item.get("regionid") is None:
             raise ValueError("No region in response")
 
-        return {
-            "id": item.get("regionid"),
-            "name": item.get("region"),
-            "dno_name": item.get("dnoregion"),
-        }
+        name = item.get("region") or item.get("shortname") or f"Region {item.get('regionid')}"
+        dno = item.get("dnoregion") or item.get("dno")
+        return {"id": item.get("regionid"), "name": name, "dno_name": dno}
     except Exception:
         raise HTTPException(status_code=500, detail="Unexpected response from National Grid")
 
 
+
 @router.get("/intensity/now/{region_id}", summary="Current intensity & renewables share for region (stateless)")
 async def intensity_now(region_id: int):
-    """
-    Calls National Grid's *current* regional endpoint for the given region_id:
-    GET /regional/regionid/{regionid}
-    Returns:
-      { ts_utc, ci_g_per_kwh, renewable_share_pct, source }
-    """
     url = f"{NG_BASE}/regional/regionid/{region_id}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -73,23 +61,27 @@ async def intensity_now(region_id: int):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Upstream error: {e}")
 
-    # Expected NG shape:
-    # { "data": [ { "from":"...", "to":"...", "intensity":{"forecast":..,"actual":..}, "generationmix":[{"fuel":"wind","perc":..}, ...] } ] }
     try:
-        data = payload.get("data")
-        item = data[0] if isinstance(data, list) and data else None
-        if not item:
-            raise ValueError("No data points in response")
+        outer = (payload.get("data") or [])
+        if not outer:
+            raise ValueError("Missing outer data list")
 
-        intensity_block = item.get("intensity") or {}
+        # NG nests the time series under .data[0].data[0]
+        region_block = outer[0]
+        inner_list = region_block.get("data") or []
+        if not inner_list:
+            raise ValueError("Missing inner data list")
+
+        point = inner_list[0]  # current half-hour
+        intensity_block = point.get("intensity") or {}
         actual = intensity_block.get("actual")
         forecast = intensity_block.get("forecast")
         value = actual if actual is not None else forecast
         source = "actual" if actual is not None else "forecast"
 
-        # Compute renewables share from generation mix (wind/solar/hydro/biomass)
+        # Renewables share from generation mix
         renewables_pct = 0.0
-        for m in (item.get("generationmix") or []):
+        for m in (point.get("generationmix") or []):
             fuel = (m.get("fuel") or "").lower()
             if fuel in {"wind", "solar", "hydro", "biomass"}:
                 try:
@@ -98,7 +90,7 @@ async def intensity_now(region_id: int):
                     pass
 
         return {
-            "ts_utc": item.get("from"),
+            "ts_utc": point.get("from"),
             "ci_g_per_kwh": value,
             "renewable_share_pct": round(renewables_pct, 2),
             "source": source,
