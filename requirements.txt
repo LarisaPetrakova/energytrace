@@ -1,2 +1,4 @@
-streamlit>=1.36,<2
+fastapi>=0.110,<1
+uvicorn[standard]>=0.23,<1
 requests>=2.31,<3
+pydantic>=2.4,<3
