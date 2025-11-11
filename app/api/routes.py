@@ -1,19 +1,36 @@
 # app/api/routes.py
 from fastapi import APIRouter, HTTPException
 import httpx
+import re
 
 router = APIRouter()
 
 NG_BASE = "https://api.carbonintensity.org.uk"
 
 
+def to_outward(postcode: str) -> str:
+    """Return the outward part (area+district) of a UK postcode, uppercased."""
+    if not postcode:
+        return ""
+    # strip spaces, upper, then take leading letters+digits up to first digit/space boundary
+    pc = postcode.strip().upper()
+    # simplest robust way: outward is token before the space if present
+    if " " in pc:
+        pc = pc.split(" ")[0]
+    return pc
+
+
 @router.get("/region/by-postcode/{postcode}", summary="Resolve region by UK postcode (stateless)")
 async def region_by_postcode(postcode: str):
     """
-    Calls National Grid's postcode endpoint and returns a minimal region object:
+    Calls National Grid's postcode endpoint with the OUTWARD postcode and returns:
     { id, name, dno_name }
     """
-    url = f"{NG_BASE}/regional/postcode/{postcode}"
+    outward = to_outward(postcode)
+    if not outward:
+        raise HTTPException(status_code=400, detail="Invalid postcode")
+
+    url = f"{NG_BASE}/regional/postcode/{outward}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(url, headers={"Accept": "application/json"})
@@ -23,17 +40,17 @@ async def region_by_postcode(postcode: str):
         raise HTTPException(status_code=502, detail=f"Upstream error: {e}")
 
     # Expected NG shape:
-    # { "data": [ { "postcode":"EC1V 0HB", "regionid":18, "region":"London", "dnoregion":"UKPN London", ... } ] }
+    # { "data": [ { "postcode":"W4", "regionid":13, "region":"London", "dnoregion":"UKPN London", ... } ] }
     try:
         data = payload.get("data")
         item = data[0] if isinstance(data, list) and data else None
-        if not item:
+        if not item or item.get("regionid") is None:
             raise ValueError("No region in response")
 
         return {
-            "id": item.get("regionid"),              # Streamlit reads 'id' (or 'region_id' fallback)
-            "name": item.get("region"),              # human label (e.g., "London")
-            "dno_name": item.get("dnoregion"),       # optional
+            "id": item.get("regionid"),
+            "name": item.get("region"),
+            "dno_name": item.get("dnoregion"),
         }
     except Exception:
         raise HTTPException(status_code=500, detail="Unexpected response from National Grid")
@@ -42,14 +59,12 @@ async def region_by_postcode(postcode: str):
 @router.get("/intensity/now/{region_id}", summary="Current intensity & renewables share for region (stateless)")
 async def intensity_now(region_id: int):
     """
-    Calls National Grid's regional intensity endpoint and returns:
-    {
-      ts_utc, ci_g_per_kwh, renewable_share_pct, source
-    }
-    Source is 'actual' when present; otherwise 'forecast'.
-    Renewable share is approximated from generation mix (wind/solar/hydro/biomass).
+    Calls National Grid's *current* regional endpoint for the given region_id:
+    GET /regional/regionid/{regionid}
+    Returns:
+      { ts_utc, ci_g_per_kwh, renewable_share_pct, source }
     """
-    url = f"{NG_BASE}/regional/intensity/{region_id}"
+    url = f"{NG_BASE}/regional/regionid/{region_id}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(url, headers={"Accept": "application/json"})
@@ -59,7 +74,7 @@ async def intensity_now(region_id: int):
         raise HTTPException(status_code=502, detail=f"Upstream error: {e}")
 
     # Expected NG shape:
-    # { "data": [ { "from":"...", "to":"...", "intensity":{"forecast":151,"actual":null}, "generationmix":[{"fuel":"wind","perc":..}, ...] } ] }
+    # { "data": [ { "from":"...", "to":"...", "intensity":{"forecast":..,"actual":..}, "generationmix":[{"fuel":"wind","perc":..}, ...] } ] }
     try:
         data = payload.get("data")
         item = data[0] if isinstance(data, list) and data else None
@@ -67,21 +82,20 @@ async def intensity_now(region_id: int):
             raise ValueError("No data points in response")
 
         intensity_block = item.get("intensity") or {}
-        # Compute renewables share from mix (approximation consistent with NG dashboard)
-        mix = item.get("generationmix") or []
+        actual = intensity_block.get("actual")
+        forecast = intensity_block.get("forecast")
+        value = actual if actual is not None else forecast
+        source = "actual" if actual is not None else "forecast"
+
+        # Compute renewables share from generation mix (wind/solar/hydro/biomass)
         renewables_pct = 0.0
-        for m in mix:
+        for m in (item.get("generationmix") or []):
             fuel = (m.get("fuel") or "").lower()
             if fuel in {"wind", "solar", "hydro", "biomass"}:
                 try:
                     renewables_pct += float(m.get("perc", 0.0))
                 except Exception:
                     pass
-
-        actual = intensity_block.get("actual")
-        forecast = intensity_block.get("forecast")
-        value = actual if actual is not None else forecast
-        source = "actual" if actual is not None else "forecast"
 
         return {
             "ts_utc": item.get("from"),
