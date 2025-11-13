@@ -5,6 +5,10 @@ import re
 
 router = APIRouter()
 
+@router.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
 NG_BASE = "https://api.carbonintensity.org.uk"
 
 
