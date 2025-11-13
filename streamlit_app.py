@@ -2,6 +2,31 @@ import os
 import requests
 import streamlit as st
 
+import time
+
+
+def fetch_json(url: str, retries: int = 5, timeout: int = 10):
+    """
+    Small helper that retries a GET several times.
+    Useful when the Render backend is waking up.
+    """
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            # simple backoff: 1s, 2s, 3s, ...
+            time.sleep(1 * (attempt + 1))
+    # if we get here, all retries failed
+    raise last_err
+
+
+
+st.caption(f"DEBUG API_BASE: {API_BASE}")
+
 API_BASE = os.getenv("API_BASE", "http://localhost:8000")
 
 # ---------- Page setup ----------
@@ -19,15 +44,14 @@ st.markdown(
 # ---------- Helpers (cached) ----------
 @st.cache_data(ttl=300)
 def get_region_by_postcode(pc: str):
-    r = requests.get(f"{API_BASE}/api/region/by-postcode/{pc}", timeout=15)
-    r.raise_for_status()
-    return r.json()
+    url = f"{API_BASE}/api/region/by-postcode/{pc}"
+    return fetch_json(url, retries=5, timeout=10)
 
 @st.cache_data(ttl=60)
 def get_now(region_id: int):
-    r = requests.get(f"{API_BASE}/api/intensity/now/{region_id}", timeout=15)
-    r.raise_for_status()
-    return r.json()
+    url = f"{API_BASE}/api/intensity/now/{region_id}"
+    return fetch_json(url, retries=5, timeout=10)
+
 
 # ---------- UI ----------
 # Persist inputs between reruns
@@ -83,8 +107,10 @@ if region_id:
                     "Showing **forecasted** intensity for the current half-hour period. "
                     "Measured (**Actual**) values usually appear after the period ends."
                 )
-        except Exception:
-            st.warning("Data temporarily unavailable. Please try again in a few minutes.")
+        # except Exception:
+            # st.warning("Data temporarily unavailable. Please try again in a few minutes.")
+	  except Exception as e:
+    		st.error(f"Request failed: {e}")
 
 st.markdown("---")
 st.caption("Data via EnergyTrace API • National Grid Carbon Intensity service.")
